@@ -1,0 +1,486 @@
+---
+title: "DME & VA Visit Visualization"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: flat
+date: "2025-04-10"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# install.packages("kableExtra")
+
+library(dplyr)
+library(ggplot2)
+library(ggridges)
+library(kableExtra)
+library(lubridate)
+library(readr)
+library(tidyr)
+
+data_dir <- "/home/idies/workspace/home/SDoHinDRWestlundE/DME & VA/Visualization 03.31.2025"
+data_csv <- "df_final_dme_va_03312025.csv"
+raw_data_path <- file.path(data_dir, data_csv)
+
+raw_data <- readr::read_csv(raw_data_path)
+
+
+```
+
+```{r functions, echo=FALSE, include = FALSE}
+summarize_date <- function(data, date_var) {
+  date_summary <- data |>
+    summarise(
+      min_date = min({{ date_var }}, na.rm = TRUE),
+      max_date = max({{ date_var }}, na.rm = TRUE)
+    )
+
+  range_summary <- data |>
+    filter(!is.na({{ date_var }})) |>
+    group_by(patient_id) |>
+    summarise(
+      range_days = as.numeric(
+        difftime(max({{ date_var }}), min({{ date_var }}), units = "days")
+      ),
+      .groups = "drop"
+    ) |>
+    summarise(
+      min_range_months = min(range_days, na.rm = TRUE) / 30.44,
+      pct_25_range_months = quantile(range_days, 0.25, na.rm = TRUE) / 30.44,
+      mean_range_months = mean(range_days, na.rm = TRUE) / 30.44,
+      median_range_months = median(range_days, na.rm = TRUE) / 30.44,
+      pct_75_range_months = quantile(range_days, 0.75, na.rm = TRUE) / 30.44,
+      max_range_months = max(range_days, na.rm = TRUE) / 30.44,
+      sd_range_months = sd(range_days, na.rm = TRUE) / 30.44
+    )
+
+  bind_cols(date_summary, range_summary) |>
+    mutate(across(where(is.numeric), ~ round(.x, 2))) |>
+    mutate(across(everything(), as.character)) |>
+    pivot_longer(everything(), names_to = "variable", values_to = "value") |> 
+    knitr::kable()
+}
+
+
+plot_visit_range_violin <- function(data, date_var, var_desc) {
+  data |>
+    filter(!is.na({{ date_var }})) |>
+    group_by(patient_id) |>
+    summarise(
+      visit_range_months = as.numeric(difftime(max({{ date_var }}), min({{ date_var }}), units = "days")) / 30.44
+    ) |>
+    ggplot(aes(x = "", y = visit_range_months)) +
+    geom_violin(scale = "count") +
+    geom_boxplot(width = 0.1) +
+    labs(
+      title = paste("Distribution of Visit Ranges per Patient"),
+      subtitle = var_desc,
+      x = NULL,
+      y = "Visit Range (Months)"
+    ) +
+    theme_minimal()
+}
+
+
+plot_n_visits_ridge <- function(data, date_var, var_desc) {
+  data |>
+    filter(!is.na({{ date_var }})) |>
+    group_by(patient_id) |>
+    summarise(
+      first_year = lubridate::year(min({{ date_var }})),
+      n_visits = n_distinct(encounter_id)
+    ) |>
+    ggplot(aes(x = n_visits, y = factor(first_year))) +
+    ggridges::geom_density_ridges(scale = 1.5, rel_min_height = 0.01) +
+    labs(
+      title = "Distribution of Number of Visits by First Visit Year",
+      subtitle = var_desc,
+      x = "Number of Visits",
+      y = "First Visit Year"
+    ) +
+    theme_minimal()
+}
+
+plot_gap_histogram <- function(data, date_var, var_desc) {
+  data |>
+    filter(!is.na({{ date_var }})) |>
+    arrange(patient_id, {{ date_var }}) |>
+    group_by(patient_id) |>
+    mutate(lag_date = lag({{ date_var }})) |>
+    filter(!is.na(lag_date)) |>
+    mutate(gap_months = as.numeric(difftime({{ date_var }}, lag_date, units = "days")) / 30.44) |>
+    ggplot(aes(x = gap_months)) +
+    geom_histogram(bins = 50, fill = "steelblue", color = "white") +
+    labs(
+      title = "Gaps Between Visits",
+      subtitle = var_desc,
+      x = "Months Between Visits",
+      y = "Frequency"
+    ) +
+    theme_minimal()
+}
+
+plot_monthly_volume <- function(data, date_var, var_desc) {
+  data |>
+    filter(!is.na({{ date_var }})) |>
+    mutate(month = lubridate::floor_date({{ date_var }}, "month")) |>
+    count(month) |>
+    ggplot(aes(x = month, y = n)) +
+    geom_col() +
+    labs(
+      title = "Monthly Encounter Volume",
+      subtitle = var_desc,
+      x = "Month",
+      y = "Count"
+    ) +
+    theme_minimal()
+}
+
+plot_visit_timeline_sample <- function(data, date_var, var_desc, n_patients = 100) {
+  sample_ids <- data |>
+    distinct(patient_id) |>
+    slice_sample(n = n_patients) |>
+    pull()
+
+  data |>
+    filter(patient_id %in% sample_ids) |>
+    ggplot(aes(x = {{ date_var }}, y = reorder(patient_id, {{ date_var }}))) +
+    geom_point(size = 1) +
+    labs(
+      title = "Visit Timeline per Patient",
+      subtitle = var_desc,
+      x = "Visit Date",
+      y = NULL
+    ) +
+    theme_minimal() +
+    theme(axis.text.y = element_blank())
+}
+
+plot_visit_timeline_facet <- function(data, date_var, var_desc, n_patients_per_year = 50) {
+  sampled_data <- data |>
+    filter(!is.na({{ date_var }})) |>
+    group_by(patient_id) |>
+    summarise(first_year = lubridate::year(min({{ date_var }})), .groups = "drop") |>
+    group_by(first_year) |>
+    slice_sample(n = n_patients_per_year) |>
+    inner_join(data, by = "patient_id")
+
+  sampled_data |>
+    ggplot(aes(x = {{ date_var }}, y = reorder(patient_id, {{ date_var }}))) +
+    geom_point(size = 1) +
+    labs(
+      title = "Visit Timeline per Patient — Faceted by First Visit Year",
+      subtitle = var_desc,
+      x = "Visit Date",
+      y = NULL
+    ) +
+    theme_minimal() +
+    theme(axis.text.y = element_blank()) +
+    facet_wrap(~ first_year, scales = "free_y")
+}
+
+
+```
+
+# Data Prep
+
+```{r}
+
+data <- raw_data |>
+  rename(
+    patient_id = emrn,
+    encounter_id = enc_id,
+    cst_visit_date = visit_date,
+    eye = eye,
+    microscope_type = microscope,
+    cst = central_subfield_thickness_num,
+    va_method = method,
+    va_logmar = BCVA,
+    va_visit_date = cur_value_datetime,
+    anti_vegf_received = code,
+    anti_vegf_medication = med_name,
+    anti_vegf_tx_date = proc_date
+  ) |> mutate(
+    patient_id = as.character(patient_id),
+    encounter_id = as.character(encounter_id),
+    cst_visit_date = as.Date(cst_visit_date),
+    eye = factor(eye),
+    microscope_type = as.factor(microscope_type),
+    cst = as.numeric(cst),
+    va_method = factor(va_method),
+    va_logmar = as.integer(va_logmar),
+    va_visit_date = as.Date(va_visit_date),
+    anti_vegf_tx_date = as.Date(anti_vegf_tx_date),
+    anti_vegf_received = as.logical(!is.na(anti_vegf_received)),
+    anti_vegf_tx_date = as.Date(anti_vegf_tx_date)
+  )
+
+```
+
+# Data File Stats
+
+## Total N
+
+```{r}
+
+data |> 
+  summarise(n_patients = n_distinct(patient_id)) |> 
+  kable()
+
+```
+
+## Total Encounters
+
+```{r}
+
+data |>
+  summarise(n_encounters = n_distinct(encounter_id)) |> 
+  kable()
+
+```
+
+## Mean Encounters/Person
+
+```{r}
+
+data |> 
+  group_by(patient_id) |> 
+  summarise(enc_count = n_distinct(encounter_id)) |> 
+  summarise(mean_encounters_per_person = mean(enc_count)) |> 
+  kable()
+
+```
+
+# Central Subfield Thickness
+
+## Visit Count
+
+```{r}
+
+data |> 
+  filter(!is.na(cst_visit_date)) |> 
+  summarise(n_with_cst = n()) |> 
+  kable()
+
+```
+
+## Visit Date Summary
+
+```{r}
+
+data |> summarize_date(cst_visit_date)
+
+```
+
+## Visualization 
+
+### Violin Plot of Visit Range
+
+```{r}
+
+data |> plot_visit_range_violin(cst_visit_date, "Visits With CST Measurement")
+
+```
+
+### Ridgeline Plot Of Number Of Visits
+
+```{r}
+
+data |> plot_n_visits_ridge(cst_visit_date, "Visits With CST Measurement")
+
+```
+
+### Gaps Between Visits
+
+```{r}
+
+data |> plot_gap_histogram(cst_visit_date, "Visits With CST Measurement")
+
+```
+
+### Monthly Encounter Volume
+
+```{r}
+
+data |> plot_monthly_volume(cst_visit_date, "Visits With CST Measurement")
+
+```
+
+### Timeline Per Patient
+
+Random sample of 100 patients
+
+```{r}
+
+data |> plot_visit_timeline_sample(cst_visit_date, "Visits With CST Measurement")
+
+```
+
+### Visit Timeline Per Patient
+
+50 sampled visits each
+
+```{r, fig.height=20}
+
+data |> plot_visit_timeline_facet(cst_visit_date, "Visits With CST Measurement")
+
+```
+
+
+# Visual Acuity
+
+## Visit Count
+
+```{r}
+
+data |> 
+  filter(!is.na(va_visit_date)) |> 
+  summarise(n_with_va = n()) |> 
+  kable()
+
+```
+
+## Visit Date Summary
+
+```{r}
+
+data |> summarize_date(va_visit_date)
+
+```
+
+## Visualization 
+
+### Violin Plot of Visit Range
+
+```{r}
+
+data |> plot_visit_range_violin(va_visit_date, "Visits With Visual Acuity Measurement")
+
+```
+
+### Ridgeline Plot Of Number Of Visits
+
+```{r}
+
+data |> plot_n_visits_ridge(va_visit_date, "Visits With Visual Acuity Measurement")
+
+```
+
+### Gaps Between Visits
+
+```{r}
+
+data |> plot_gap_histogram(va_visit_date, "Visits With Visual Acuity Measurement")
+
+```
+
+### Monthly Encounter Volume
+
+```{r}
+
+data |> plot_monthly_volume(va_visit_date, "Visits With Visual Acuity Measurement")
+
+```
+
+### Timeline Per Patient
+
+Random sample of 100 patients
+
+```{r}
+
+data |> plot_visit_timeline_sample(va_visit_date, "Visits With Visual Acuity Measurement")
+
+```
+
+### Visit Timeline Per Patient
+
+50 sampled visits each
+
+```{r, fig.height=20}
+
+data |> plot_visit_timeline_facet(va_visit_date, "Visits With Visual Acuity Measurement")
+
+```
+
+
+
+# VEGF Procedure
+
+## Visit Count
+
+```{r}
+
+data |> 
+  filter(!is.na(anti_vegf_tx_date)) |> 
+  summarise(n_with_vegf_procedure = n()) |> 
+  kable()
+
+```
+
+## Visit Date Summary
+
+```{r}
+
+data |> summarize_date(anti_vegf_tx_date)
+
+```
+
+## Visualization 
+
+### Violin Plot of Visit Range
+
+```{r}
+
+data |> plot_visit_range_violin(anti_vegf_tx_date, "Visits With Anti-VEGF Procedure")
+
+```
+
+### Ridgeline Plot Of Number Of Visits
+
+```{r}
+
+data |> plot_n_visits_ridge(anti_vegf_tx_date, "Visits With Anti-VEGF Procedure")
+
+```
+
+### Gaps Between Visits
+
+```{r}
+
+data |> plot_gap_histogram(anti_vegf_tx_date, "Visits With Anti-VEGF Procedure")
+
+```
+
+### Monthly Encounter Volume
+
+```{r}
+
+data |> plot_monthly_volume(anti_vegf_tx_date, "Visits With Anti-VEGF Procedure")
+
+```
+
+### Timeline Per Patient
+
+Random sample of 100 patients
+
+```{r}
+
+data |> plot_visit_timeline_sample(anti_vegf_tx_date, "Visits With Anti-VEGF Procedure")
+
+```
+
+### Visit Timeline Per Patient
+
+50 sampled visits each
+
+```{r, fig.height=20}
+
+data |> plot_visit_timeline_facet(anti_vegf_tx_date, "Visits With Anti-VEGF Procedure")
+
+```
